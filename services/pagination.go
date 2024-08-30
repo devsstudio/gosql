@@ -706,7 +706,7 @@ func (service *Pagination) getItems(sql string, cols []string, placeholders []in
 
 // Otras funciones
 func validateOperator(validOperators []string, opr string) error {
-	if !helpers.StringContains(validOperators, opr) {
+	if !helpers.ArrayContains(validOperators, opr) {
 		return errors.New("operator filter '" + opr + "' not allowed")
 	}
 	return nil
