@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,14 +22,15 @@ import (
 
 type (
 	Pagination struct {
-		db            *gorm.DB
-		columns       types.Columns
-		table         string
-		originalWhere string
-		where         string
-		group         string
-		order         string
-		offsetLimit   string
+		db                   *gorm.DB
+		columns              types.Columns
+		table                string
+		originalWhere        string
+		where                string
+		group                string
+		order                string
+		offsetLimit          string
+		originalPlaceholders []any
 	}
 )
 
@@ -37,6 +39,7 @@ func PaginationService(db *gorm.DB, baseParams types.ListParams) *Pagination {
 	originalWhere := ""
 	where := ""
 	group := ""
+	placeholders := []any{}
 	// Adding WHERE
 	if baseParams.Where != nil && len(strings.TrimSpace(baseParams.Table)) > 0 {
 		originalWhere = *baseParams.Where
@@ -53,20 +56,25 @@ func PaginationService(db *gorm.DB, baseParams types.ListParams) *Pagination {
 		group = ""
 	}
 
-	return &Pagination{
-		db:            db,
-		columns:       baseParams.Columns,
-		table:         baseParams.Table,
-		originalWhere: originalWhere,
-		where:         where,
-		group:         group,
-		order:         "",
-		offsetLimit:   "",
+	service := &Pagination{
+		db:                   db,
+		columns:              baseParams.Columns,
+		table:                baseParams.Table,
+		originalWhere:        originalWhere,
+		where:                where,
+		group:                group,
+		originalPlaceholders: placeholders,
+		order:                "",
+		offsetLimit:          "",
 	}
+	service.table = service.replaceOriginalPlaceholders(baseParams.Table, baseParams.Placeholders, &service.originalPlaceholders)
+	service.originalWhere = service.replaceOriginalPlaceholders(service.originalWhere, baseParams.Placeholders, &service.originalPlaceholders)
+	return service
 }
 
-func (service *Pagination) FindAll(filters []request.FilterRequest, findRequest request.FindRequest, exclusions *[]string) ([]map[string]interface{}, error) {
-	placeholders := []interface{}{}
+func (service *Pagination) FindAll(filters []request.FilterRequest, findRequest request.FindRequest, exclusions *[]string) ([]map[string]any, error) {
+	placeholders := make([]any, len(service.originalPlaceholders))
+	copy(placeholders, service.originalPlaceholders)
 
 	var err error = nil
 	service.where, err = service.getFilters(filters, service.originalWhere, &placeholders)
@@ -85,9 +93,11 @@ func (service *Pagination) FindAll(filters []request.FilterRequest, findRequest 
 }
 
 func (service *Pagination) FindSelect2(filters []request.FilterRequest, infiniteScroll request.InfiniteScrollRequest, valueAttribute, textAttribute string) (*response.Select2Response, error) {
-	placeholders := []interface{}{}
+	placeholders := make([]any, len(service.originalPlaceholders))
+	copy(placeholders, service.originalPlaceholders)
+
 	var err error = nil
-	service.where, err = service.getFilters(filters, "1 = 1", &placeholders)
+	service.where, err = service.getFilters(filters, service.originalWhere, &placeholders)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +109,7 @@ func (service *Pagination) FindSelect2(filters []request.FilterRequest, infinite
 	sql := service.getSql(selectPairs)
 
 	// Ejecutar la consulta
-	items, err := service.getItems(sql, []string{valueAttribute, textAttribute}, placeholders)
+	items, err := service.getItems(sql, []string{"value", "label"}, placeholders)
 	if err != nil {
 		return nil, err
 	}
@@ -108,9 +118,10 @@ func (service *Pagination) FindSelect2(filters []request.FilterRequest, infinite
 }
 
 func (service *Pagination) FindPaginated(filters []request.FilterRequest, pagination request.PaginationRequest, exclusions *[]string) (*response.PaginationResponse, error) {
-	placeholders := []interface{}{}
-	var err error = nil
+	placeholders := make([]any, len(service.originalPlaceholders))
+	copy(placeholders, service.originalPlaceholders)
 
+	var err error = nil
 	service.where, err = service.getFilters(filters, service.originalWhere, &placeholders)
 	if err != nil {
 		return nil, err
@@ -150,9 +161,10 @@ func (service *Pagination) FindPaginated(filters []request.FilterRequest, pagina
 }
 
 func (service *Pagination) FindPaginatedOffset(filters []request.FilterRequest, pagination request.PaginationOffsetRequest, exclusions *[]string) (*response.PaginationOffsetResponse, error) {
-	placeholders := []interface{}{}
-	var err error = nil
+	placeholders := make([]any, len(service.originalPlaceholders))
+	copy(placeholders, service.originalPlaceholders)
 
+	var err error = nil
 	// Contar sin filtros
 	totalItems := 0
 	if len(filters) > 0 {
@@ -197,7 +209,9 @@ func (service *Pagination) FindPaginatedOffset(filters []request.FilterRequest, 
 }
 
 func (service *Pagination) Count(filters []request.FilterRequest) (int, error) {
-	placeholders := []interface{}{}
+	placeholders := make([]any, len(service.originalPlaceholders))
+	copy(placeholders, service.originalPlaceholders)
+
 	var err error = nil
 	service.where, err = service.getFilters(filters, service.originalWhere, &placeholders)
 	if err != nil {
@@ -207,7 +221,31 @@ func (service *Pagination) Count(filters []request.FilterRequest) (int, error) {
 	return service.internalCount(placeholders), nil
 }
 
-func (service *Pagination) internalCount(placeholders []interface{}) int {
+func (service *Pagination) replaceOriginalPlaceholders(str string, originalPlaceholders map[string]any, placeholders *[]any) string {
+
+	var keys []string
+	// Extraemos las claves del mapa
+	for key := range originalPlaceholders {
+		keys = append(keys, key)
+	}
+
+	// Ordenamos las claves por longitud en orden descendente para evitar colisiones
+	sort.Slice(keys, func(i, j int) bool {
+		return len(keys[i]) > len(keys[j])
+	})
+
+	// Recorremos cada key-value del map
+	for _, key := range keys {
+		// Si encontramos el key en el string
+		for strings.Contains(str, ":"+key) {
+			// Reemplazamos la primera ocurrencia del key por el valor de reemplazo
+			str = strings.Replace(str, ":"+key, service.setPlaceholder(placeholders, originalPlaceholders[key]), 1)
+		}
+	}
+	return str
+}
+
+func (service *Pagination) internalCount(placeholders []any) int {
 	sql := service.getCountSql()
 
 	// Ejecuta la consulta y obtiene el resultado.
@@ -306,7 +344,7 @@ func (service *Pagination) getColumnCount() string {
 	return "COUNT(*)"
 }
 
-func (service *Pagination) getFilters(filters []request.FilterRequest, condition string, placeholders *[]interface{}) (string, error) {
+func (service *Pagination) getFilters(filters []request.FilterRequest, condition string, placeholders *[]any) (string, error) {
 	if filters == nil {
 		return "", errors.New("filters should be an array")
 	}
@@ -441,7 +479,7 @@ func (service *Pagination) verifyFilterRequest(filter *request.FilterRequest) er
 	return nil
 }
 
-func (service *Pagination) processFilter(filter request.FilterRequest, condition string, placeholders *[]interface{}) string {
+func (service *Pagination) processFilter(filter request.FilterRequest, condition string, placeholders *[]any) string {
 	switch filter.Type {
 	case "SIMPLE":
 		return service.processSimpleOrNumericFilter(filter, condition, placeholders)
@@ -492,7 +530,7 @@ func (service *Pagination) getOrder(order types.Order) string {
 	return ""
 }
 
-func (service *Pagination) processSimpleOrNumericFilter(filter request.FilterRequest, condition string, placeholders *[]interface{}) string {
+func (service *Pagination) processSimpleOrNumericFilter(filter request.FilterRequest, condition string, placeholders *[]any) string {
 	column := *service.getColumn(filter.Attr)
 
 	return fmt.Sprintf(
@@ -518,7 +556,7 @@ func (service *Pagination) processColumnFilter(filter request.FilterRequest, con
 	)
 }
 
-func (service *Pagination) processBetweenFilter(filter request.FilterRequest, not bool, condition string, placeholders *[]interface{}) string {
+func (service *Pagination) processBetweenFilter(filter request.FilterRequest, not bool, condition string, placeholders *[]any) string {
 
 	// Creamos la columna
 	column := *service.getColumn(filter.Attr)
@@ -541,7 +579,7 @@ func (service *Pagination) processBetweenFilter(filter request.FilterRequest, no
 	}
 }
 
-func (service *Pagination) processInFilter(filter request.FilterRequest, not bool, condition string, placeholders *[]interface{}) string {
+func (service *Pagination) processInFilter(filter request.FilterRequest, not bool, condition string, placeholders *[]any) string {
 
 	currentPlaceholders := []string{}
 	for _, val := range filter.Vals {
@@ -579,7 +617,7 @@ func (service *Pagination) processNullFilter(filter request.FilterRequest, not b
 	}
 }
 
-func (service *Pagination) processTermFilter(filter request.FilterRequest, condition string, placeholders *[]interface{}) string {
+func (service *Pagination) processTermFilter(filter request.FilterRequest, condition string, placeholders *[]any) string {
 
 	// Recorremos las columnas para filtros OR
 	var ors []string
@@ -592,7 +630,7 @@ func (service *Pagination) processTermFilter(filter request.FilterRequest, condi
 }
 
 // Creamos la columna
-func (service *Pagination) processDateFilter(filter request.FilterRequest, condition string, placeholders *[]interface{}) string {
+func (service *Pagination) processDateFilter(filter request.FilterRequest, condition string, placeholders *[]any) string {
 	column := *service.getColumn(filter.Attr)
 
 	conn := getConn(filter.Conn, condition)
@@ -618,7 +656,7 @@ func (service *Pagination) processDateFilter(filter request.FilterRequest, condi
 	}
 }
 
-func (service *Pagination) processDateBetweenFilter(filter request.FilterRequest, condition string, placeholders *[]interface{}) string {
+func (service *Pagination) processDateBetweenFilter(filter request.FilterRequest, condition string, placeholders *[]any) string {
 
 	column := *service.getColumn(filter.Attr)
 
@@ -642,7 +680,7 @@ func (service *Pagination) processDateBetweenFilter(filter request.FilterRequest
 	}
 }
 
-func (service *Pagination) setPlaceholder(placeholders *[]interface{}, value string) string {
+func (service *Pagination) setPlaceholder(placeholders *[]any, value any) string {
 
 	*placeholders = append(*placeholders, value)
 
@@ -656,9 +694,9 @@ func (service *Pagination) setPlaceholder(placeholders *[]interface{}, value str
 	}
 }
 
-// func (service *Pagination) setPlaceholder(placeholders *[]interface{}, value string) string {
+// func (service *Pagination) setPlaceholder(placeholders *[]any, value string) string {
 // 	if *placeholders == nil {
-// 		*placeholders = make(map[string]interface{})
+// 		*placeholders = make(map[string]any)
 // 	}
 
 // 	key := "p" + strconv.Itoa(len(*placeholders))
@@ -668,7 +706,7 @@ func (service *Pagination) setPlaceholder(placeholders *[]interface{}, value str
 // 	return "@" + key
 // }
 
-func (service *Pagination) getItems(sql string, cols []string, placeholders []interface{}) ([]map[string]interface{}, error) {
+func (service *Pagination) getItems(sql string, cols []string, placeholders []any) ([]map[string]any, error) {
 
 	rows, err := service.db.Raw(sql, placeholders...).Rows()
 	if err != nil {
@@ -676,10 +714,10 @@ func (service *Pagination) getItems(sql string, cols []string, placeholders []in
 	}
 	defer rows.Close()
 
-	items := []map[string]interface{}{}
+	items := []map[string]any{}
 	for rows.Next() {
-		columns := make([]interface{}, len(cols))
-		columnPointers := make([]interface{}, len(cols))
+		columns := make([]any, len(cols))
+		columnPointers := make([]any, len(cols))
 		for i := range columns {
 			columnPointers[i] = &columns[i]
 		}
@@ -688,9 +726,9 @@ func (service *Pagination) getItems(sql string, cols []string, placeholders []in
 			return nil, err
 		}
 
-		row := make(map[string]interface{})
+		row := make(map[string]any)
 		for i, colName := range cols {
-			val := columnPointers[i].(*interface{})
+			val := columnPointers[i].(*any)
 			row[colName] = *val
 		}
 

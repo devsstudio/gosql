@@ -7,8 +7,9 @@ type Order map[string]string
 type Row map[string]interface{}
 
 type ListParams struct {
-	Columns Columns
-	Table   string
-	Where   *string
-	Group   *string
+	Columns      Columns
+	Table        string
+	Where        *string
+	Group        *string
+	Placeholders map[string]any
 }
